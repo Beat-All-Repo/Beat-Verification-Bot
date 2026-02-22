@@ -107,11 +107,11 @@ async def get_active_code(telegram_id: int):
 
 
 async def create_code(telegram_id: int) -> str:
-    """Deactivate old code + clear its devices, then generate a fresh one."""
+    """Delete old code + clear its devices, then generate a fresh one."""
     old = await a_codes_col.find_one({"telegram_id": telegram_id, "is_active": True})
     if old:
         await a_devices_col.delete_many({"code": old["code"]})
-        await a_codes_col.update_one({"_id": old["_id"]}, {"$set": {"is_active": False}})
+        await a_codes_col.delete_one({"_id": old["_id"]})
 
     while True:
         code = _gen_code()
@@ -129,18 +129,18 @@ async def create_code(telegram_id: int) -> str:
 
 
 async def revoke_code(telegram_id: int):
-    """User-triggered revoke."""
+    """User-triggered revoke - deletes code from DB."""
     doc = await a_codes_col.find_one({"telegram_id": telegram_id, "is_active": True})
     if doc:
         await a_devices_col.delete_many({"code": doc["code"]})
-        await a_codes_col.update_one({"_id": doc["_id"]}, {"$set": {"is_active": False}})
+        await a_codes_col.delete_one({"_id": doc["_id"]})
 
 
 async def invalidate_all_codes(telegram_id: int):
-    """Auto-revoke when user leaves a channel."""
+    """Auto-revoke when user leaves a channel - deletes codes from DB."""
     async for doc in a_codes_col.find({"telegram_id": telegram_id, "is_active": True}):
         await a_devices_col.delete_many({"code": doc["code"]})
-        await a_codes_col.update_one({"_id": doc["_id"]}, {"$set": {"is_active": False}})
+        await a_codes_col.delete_one({"_id": doc["_id"]})
 
 
 async def get_device_count(code: str) -> int:
@@ -221,14 +221,11 @@ def sync_check_code(code: str) -> dict:
 
 
 def sync_revoke_code(code: str = None, telegram_id: int = None):
-    """Admin API revoke by code string or telegram_id."""
+    """Admin API revoke - deletes code from DB to save space."""
     if code:
         s_devices_col.delete_many({"code": code})
-        s_codes_col.update_one({"code": code}, {"$set": {"is_active": False}})
+        s_codes_col.delete_one({"code": code})
     elif telegram_id:
         for doc in s_codes_col.find({"telegram_id": telegram_id, "is_active": True}):
             s_devices_col.delete_many({"code": doc["code"]})
-        s_codes_col.update_many(
-            {"telegram_id": telegram_id, "is_active": True},
-            {"$set": {"is_active": False}},
-        )
+        s_codes_col.delete_many({"telegram_id": telegram_id, "is_active": True})
