@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: tg-verify-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: API_ID
+        value: "YOUR_API_ID"
+      - key: API_HASH
+        value: "YOUR_API_HASH"
+      - key: BOT_TOKEN
+        value: "YOUR_BOT_TOKEN"
+      - key: BOT_USERNAME
+        value: "YourBotUsername"
+      - key: MONGO_URI
+        value: "mongodb+srv://user:pass@cluster.mongodb.net"
+      - key: DB_NAME
+        value: "verifybot"
+      - key: ADMIN_IDS
+        value: "123456789"
+      - key: API_SECRET
+        value: "use_a_strong_random_secret_here"
+      - key: PORT
+        value: "10000"
+      - key: SUPPORT_GROUP
+        value: "https://t.me/YourSupportGroup"
+      - key: UPDATES_CHANNEL
+        value: "https://t.me/YourChannel"
+      - key: START_PIC
+        value: "https://telegra.ph/file/ec17880d61180d3312d6a.jpg"
+      - key: HELP_PIC
+        value: "https://telegra.ph/file/e292b12890b8b4b9dcbd1.jpg"
+      - key: FORCE_PIC
+        value: "https://telegra.ph/file/ec17880d61180d3312d6a.jpg"
+      - key: VERIFY_PIC
+        value: "https://telegra.ph/file/ec17880d61180d3312d6a.jpg"
