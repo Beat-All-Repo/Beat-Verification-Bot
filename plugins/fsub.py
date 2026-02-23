@@ -1,83 +1,80 @@
 # ═══════════════════════════════════════════════════════
-#  VERIFICATION BOT — FSUB WATCHER
+#  VERIFICATION BOT — HELPERS
 #
-#  FSub channels use join-request mode:
-#    on_chat_join_request  → store user in req_users DB
-#    on_chat_member_updated → remove from req_users when user leaves
-#                           → invalidate codes when user leaves
-#
-#  Mandatory channel uses direct join (no request handling here).
+#  FSub check: MEMBER status OR in req_users DB
+#  Mandatory check: MEMBER status OR in req_users DB (handles both direct & request-mode channels)
 # ═══════════════════════════════════════════════════════
 
-from pyrogram.types import ChatMemberUpdated, ChatJoinRequest
+import os
+import random
 from pyrogram.enums import ChatMemberStatus
-from bot import Bot
 from database.database import (
     get_fsub_channels,
     get_mandatory_channel,
-    invalidate_all_codes,
-    reqChannel_exist,
     req_user_exist,
-    req_user,
-    del_req_user,
 )
 
 
-# ── Handle join requests (FSub channels only) ─────────
-
-@Bot.on_chat_join_request()
-async def handle_join_request(client: Bot, request: ChatJoinRequest):
-    chat_id = request.chat.id
-    user_id = request.from_user.id
-
-    # Only process FSub channels (mandatory uses direct join — no requests)
-    if not await reqChannel_exist(chat_id):
-        return
-
-    # Store user in req_users so is_subscribed() counts them as joined
-    if not await req_user_exist(chat_id, user_id):
-        await req_user(chat_id, user_id)
-        print(f"[FSUB] ✅ Stored join request: user {user_id} → channel {chat_id}")
+async def is_sub(client, user_id: int, channel_id: int) -> bool:
+    """Check if user is a real member of a channel (MEMBER/ADMIN/OWNER)."""
+    try:
+        member = await client.get_chat_member(channel_id, user_id)
+        return member.status in (
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        )
+    except Exception:
+        return False
 
 
-# ── Handle member updates ─────────────────────────────
+async def is_sub_fsub(client, user_id: int, channel_id: int) -> bool:
+    """
+    FSub channel check — passes if EITHER:
+    1. User is a full MEMBER/ADMIN/OWNER, OR
+    2. User has sent a join request (stored in req_users DB)
 
-@Bot.on_chat_member_updated()
-async def handle_member_update(client: Bot, update: ChatMemberUpdated):
-    chat_id = update.chat.id
+    This allows join-request-mode channels to work correctly.
+    """
+    # Check real membership first
+    if await is_sub(client, user_id, channel_id):
+        return True
+    # Fall back to join-request DB
+    return await req_user_exist(channel_id, user_id)
 
-    # Watch both fsub and mandatory channels
-    fsub    = set(await get_fsub_channels())
-    mand    = await get_mandatory_channel()
-    watched = fsub | ({mand} if mand else set())
 
-    if chat_id not in watched:
-        return
+async def is_subscribed(client, user_id: int) -> bool:
+    """
+    Check ALL fsub channels.
+    Uses is_sub_fsub so join-request users are counted as subscribed.
+    """
+    channels = await get_fsub_channels()
+    for ch_id in channels:
+        if not await is_sub_fsub(client, user_id, ch_id):
+            return False
+    return True
 
-    old = update.old_chat_member
-    new = update.new_chat_member
-    if not old or not new:
-        return
 
-    was_in = old.status in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.OWNER,
-    )
-    now_in = new.status in (
-        ChatMemberStatus.MEMBER,
-        ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.OWNER,
-    )
+async def is_in_mandatory(client, user_id: int) -> bool:
+    """
+    Check mandatory verification channel.
+    Accepts BOTH direct members AND join-request users —
+    this handles channels with 'Approve new members' enabled.
+    """
+    ch_id = await get_mandatory_channel()
+    if not ch_id:
+        return True  # No mandatory channel set → skip check
 
-    if was_in and not now_in:
-        user_id = old.user.id
-        print(f"[FSUB] User {user_id} left {chat_id} — cleaning up")
+    # Check real membership first (direct join channels)
+    if await is_sub(client, user_id, ch_id):
+        return True
 
-        # Remove from req_users DB if this is a fsub channel
-        if chat_id in fsub:
-            if await req_user_exist(chat_id, user_id):
-                await del_req_user(chat_id, user_id)
+    # Fall back to join-request DB (request-mode channels)
+    return await req_user_exist(ch_id, user_id)
 
-        # Invalidate all their codes
-        await invalidate_all_codes(user_id)
+
+def get_pic(env_key: str, fallback: str) -> str:
+    """Pick a random picture from comma-separated env var."""
+    pics = os.environ.get(env_key, "").split(",")
+    pics = [p.strip() for p in pics if p.strip()]
+    return random.choice(pics) if pics else fallback
