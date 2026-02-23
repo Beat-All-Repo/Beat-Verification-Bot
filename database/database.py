@@ -179,32 +179,44 @@ def sync_global_stats() -> dict:
 
 
 def sync_verify_code(code: str, device_id: str) -> dict:
-    """Full verify — registers device slot."""
+    """Full verify — registers device slot. Netflix-style: evicts oldest if full."""
     doc = s_codes_col.find_one({"code": code, "is_active": True})
     if not doc:
         return {"valid": False, "reason": "Code not found or no longer active"}
 
-    # Already registered on this device
-    if s_devices_col.find_one({"code": code, "device_id": device_id}):
+    # Already registered on this device — allow in
+    existing = s_devices_col.find_one({"code": code, "device_id": device_id})
+    if existing:
         dev_count = s_devices_col.count_documents({"code": code})
         return {
             "valid": True, "telegram_id": doc["telegram_id"],
-            "devices_used": dev_count, "devices_max": MAX_DEVICES, "device_slot": "existing",
+            "devices_used": dev_count, "devices_max": MAX_DEVICES,
+            "device_slot": "existing",
         }
 
     dev_count = s_devices_col.count_documents({"code": code})
-    if dev_count >= MAX_DEVICES:
-        return {
-            "valid": False,
-            "reason": f"Maximum {MAX_DEVICES} devices already using this code",
-            "devices_used": dev_count,
-        }
 
-    s_devices_col.insert_one({"code": code, "device_id": device_id, "claimed_at": _now()})
+    # Netflix style: if at limit, evict the oldest device to make room
+    if dev_count >= MAX_DEVICES:
+        oldest = s_devices_col.find_one(
+            {"code": code},
+            sort=[("claimed_at", 1)]  # oldest first
+        )
+        if oldest:
+            s_devices_col.delete_one({"_id": oldest["_id"]})
+            dev_count -= 1
+
+    s_devices_col.insert_one({
+        "code":       code,
+        "device_id":  device_id,
+        "claimed_at": _now(),
+    })
     s_codes_col.update_one({"code": code}, {"$inc": {"total_claims": 1}})
+
     return {
         "valid": True, "telegram_id": doc["telegram_id"],
-        "devices_used": dev_count + 1, "devices_max": MAX_DEVICES, "device_slot": "new",
+        "devices_used": dev_count + 1, "devices_max": MAX_DEVICES,
+        "device_slot": "new",
     }
 
 
