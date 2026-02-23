@@ -241,7 +241,7 @@ def sync_verify_code(code: str, device_id: str) -> dict:
             s_devices_col.delete_one({"_id": oldest["_id"]})
             dev_count -= 1
 
-    s_devices_col.insert_one({"code": code, "device_id": device_id, "claimed_at": _now()})
+    s_devices_col.insert_one({"code": code, "device_id": device_id, "ip":ip, "claimed_at": _now()})
     s_codes_col.update_one({"code": code}, {"$inc": {"total_claims": 1}})
     return {"valid": True, "telegram_id": doc["telegram_id"],
             "devices_used": dev_count + 1, "devices_max": MAX_DEVICES, "device_slot": "new"}
