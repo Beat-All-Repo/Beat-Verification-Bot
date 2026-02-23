@@ -1,5 +1,8 @@
 # ═══════════════════════════════════════════════════════
 #  VERIFICATION BOT — CALLBACK HANDLER
+#
+#  FSub channels    → join REQUEST link (stored in DB, counts as joined)
+#  Mandatory channel → DIRECT join link (user joins instantly)
 # ═══════════════════════════════════════════════════════
 
 from datetime import datetime, timedelta
@@ -24,21 +27,21 @@ print("[CBB] ✅ Callback handler loading...")
 def _help_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("💬 Sᴜᴘᴘᴏʀᴛ",  url=SUPPORT_GROUP),
-            InlineKeyboardButton("📣 Cʜᴀɴɴᴇʟ",  url=UPDATES_CHANNEL),
+            InlineKeyboardButton("💬 Sᴜᴘᴘᴏʀᴛ", url=SUPPORT_GROUP),
+            InlineKeyboardButton("📣 Cʜᴀɴɴᴇʟ", url=UPDATES_CHANNEL),
         ],
         [
-            InlineKeyboardButton("🏠 Hᴏᴍᴇ",    callback_data="start"),
-            InlineKeyboardButton("✖️ Cʟᴏsᴇ",   callback_data="close"),
+            InlineKeyboardButton(" Hᴏᴍᴇ",  callback_data="start"),
+            InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close"),
         ],
     ])
 
 
 def _help_text(user_name: str) -> str:
     content = (
-        "<b>➪ I ᴀᴍ ᴀ Wᴇʙsɪᴛᴇ Vᴇʀɪғɪᴄᴀᴛɪᴏɴ Bᴏᴛ.\n\n"
-        "➪ I ɢᴇɴᴇʀᴀᴛᴇ ᴀ <code>6-ᴅɪɢɪᴛ ᴄᴏᴅᴇ</code> ʏᴏᴜ ᴇɴᴛᴇʀ ᴏɴ ᴛʜᴇ ᴡᴇʙsɪᴛᴇ.\n\n"
-        "➪ Yᴏᴜ ᴍᴜsᴛ ʀᴇᴍᴀɪɴ ɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟs ᴛᴏ ᴋᴇᴇᴘ ʏᴏᴜʀ ᴄᴏᴅᴇ ᴀᴄᴛɪᴠᴇ.\n\n"
+        "<b>➪ I ᴀᴍ ᴀ Wᴇʙsɪᴛᴇ Vᴇʀɪғɪᴄᴀᴛɪᴏɴ Bᴏᴛ.\n"
+        "➪ I ɢᴇɴᴇʀᴀᴛᴇ ᴀ <code>6-ᴅɪɢɪᴛ ᴄᴏᴅᴇ</code> ʏᴏᴜ ᴇɴᴛᴇʀ ᴏɴ ᴛʜᴇ ᴡᴇʙsɪᴛᴇ.\n"
+        "➪ Yᴏᴜ ᴍᴜsᴛ ʀᴇᴍᴀɪɴ ɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟs ᴛᴏ ᴋᴇᴇᴘ ʏᴏᴜʀ ᴄᴏᴅᴇ ᴀᴄᴛɪᴠᴇ.\n"
         "━ /start   — Mᴀɪɴ ᴍᴇɴᴜ\n"
         "━ /mycode  — Sʜᴏᴡ ʏᴏᴜʀ ᴄᴜʀʀᴇɴᴛ ᴄᴏᴅᴇ\n"
         "━ /revoke  — Rᴇᴠᴏᴋᴇ ʏᴏᴜʀ ᴄᴏᴅᴇ\n"
@@ -51,46 +54,84 @@ def _help_text(user_name: str) -> str:
     )
 
 
-# ── Inline join button builders ───────────────────────
+# ── Link builders ─────────────────────────────────────
+
+async def _request_link(client, ch_id: int) -> str:
+    """
+    FSub — creates a JOIN REQUEST link.
+    User sends request → on_chat_join_request fires → stored in DB.
+    Bot does NOT auto-approve — user stays as requester, DB counts them as joined.
+    """
+    try:
+        inv = await client.create_chat_invite_link(
+            ch_id,
+            expire_date=datetime.utcnow() + timedelta(hours=24),
+            creates_join_request=True,
+        )
+        return inv.invite_link
+    except Exception as e:
+        print(f"[CBB] request link error {ch_id}: {e}")
+        try:
+            chat = await client.get_chat(ch_id)
+            if chat.username:
+                return f"https://t.me/{chat.username}"
+        except Exception:
+            pass
+        return None
+
+
+async def _direct_link(client, ch_id: int) -> str:
+    """
+    Mandatory channel — creates a DIRECT join link.
+    User joins instantly → bot can verify MEMBER status right away.
+    """
+    try:
+        chat = await client.get_chat(ch_id)
+        if chat.username:
+            return f"https://t.me/{chat.username}"
+        inv = await client.create_chat_invite_link(
+            ch_id,
+            expire_date=datetime.utcnow() + timedelta(hours=24),
+            # No creates_join_request → direct join
+        )
+        return inv.invite_link
+    except Exception as e:
+        print(f"[CBB] direct link error {ch_id}: {e}")
+        return None
+
+
+# ── Join button builders ──────────────────────────────
 
 async def _fsub_buttons(client, user_id: int) -> list:
-    """Build join buttons only for channels user hasn't joined."""
-    buttons = []
+    """Request-join buttons for FSub channels user hasn't joined/requested."""
+    buttons  = []
     channels = await get_fsub_channels()
     for ch_id in channels:
-        if not await is_sub(client, user_id, ch_id):
+        from helper_func import is_sub_fsub
+        if not await is_sub_fsub(client, user_id, ch_id):
             try:
                 chat = await client.get_chat(ch_id)
-                if chat.username:
-                    link = f"https://t.me/{chat.username}"
-                else:
-                    inv  = await client.create_chat_invite_link(
-                        ch_id, expire_date=datetime.utcnow() + timedelta(hours=24)
-                    )
-                    link = inv.invite_link
-                buttons.append([InlineKeyboardButton(f"📣 {chat.title}", url=link)])
+                link = await _request_link(client, ch_id)
+                if link:
+                    buttons.append([InlineKeyboardButton(f"📣 {chat.title}", url=link)])
             except Exception as e:
-                print(f"[CBB] FSub link error {ch_id}: {e}")
+                print(f"[CBB] FSub button error {ch_id}: {e}")
     return buttons
 
 
 async def _mandatory_button(client):
+    """Direct-join button for the mandatory verification channel."""
     ch_id = await get_mandatory_channel()
     if not ch_id:
         return None
     try:
         chat = await client.get_chat(ch_id)
-        if chat.username:
-            link = f"https://t.me/{chat.username}"
-        else:
-            inv  = await client.create_chat_invite_link(
-                ch_id, expire_date=datetime.utcnow() + timedelta(hours=24)
-            )
-            link = inv.invite_link
-        return InlineKeyboardButton(f"🔐 {chat.title} (Verification)", url=link)
+        link = await _direct_link(client, ch_id)
+        if link:
+            return InlineKeyboardButton(f"🔐 {chat.title} (Verification)", url=link)
     except Exception as e:
-        print(f"[CBB] Mandatory link error: {e}")
-        return None
+        print(f"[CBB] Mandatory button error: {e}")
+    return None
 
 
 # ── Main callback router ──────────────────────────────
@@ -137,6 +178,10 @@ async def cb_handler(client: Bot, query: CallbackQuery):
             )
         except Exception as e:
             print(f"[CBB] start fallback: {e}")
+            await client.send_message(
+                chat_id=user_id, text=caption,
+                reply_markup=start_keyboard(), parse_mode=ParseMode.HTML,
+            )
 
     # ── Help ──────────────────────────────────────────
     elif data == "help":
@@ -159,14 +204,15 @@ async def cb_handler(client: Bot, query: CallbackQuery):
     # ── FSub Panel ────────────────────────────────────
     elif data == "fsub_panel":
         await query.answer()
-        channels    = await get_fsub_channels()
-        mand_ch     = await get_mandatory_channel()
-        lines       = [f"<b>📢 Fᴏʀᴄᴇ-Sᴜʙ Sᴛᴀᴛᴜs ({len(channels)} ᴄʜᴀɴɴᴇʟs):</b>\n"]
+        channels = await get_fsub_channels()
+        mand_ch  = await get_mandatory_channel()
+        lines    = [f"<b> Fᴏʀᴄᴇ-Sᴜʙ Sᴛᴀᴛᴜs ({len(channels)} ᴄʜᴀɴɴᴇʟs):</b>\n"]
 
+        from helper_func import is_sub_fsub
         for ch_id in channels:
             try:
                 chat   = await client.get_chat(ch_id)
-                joined = await is_sub(client, user_id, ch_id)
+                joined = await is_sub_fsub(client, user_id, ch_id)
                 tick   = "✅" if joined else "❌"
                 lines.append(f"<b>{tick} {chat.title}</b>")
             except Exception:
@@ -186,14 +232,26 @@ async def cb_handler(client: Bot, query: CallbackQuery):
 
         lines.append("\n<i>Jᴏɪɴ ᴀʟʟ ✅ ᴄʜᴀɴɴᴇʟs ᴛᴏ ɢᴇᴛ ʏᴏᴜʀ ᴄᴏᴅᴇ.</i>")
 
-        await query.message.edit_text(
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏠 Hᴏᴍᴇ", callback_data="start"),
-                 InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close")]
-            ]),
-            parse_mode=ParseMode.HTML,
-        )
+        try:
+            await query.message.edit_text(
+                "\n".join(lines),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(" Hᴏᴍᴇ", callback_data="start"),
+                     InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close")]
+                ]),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            await query.message.delete()
+            await client.send_message(
+                chat_id=user_id,
+                text="\n".join(lines),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(" Hᴏᴍᴇ", callback_data="start"),
+                     InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close")]
+                ]),
+                parse_mode=ParseMode.HTML,
+            )
 
     # ── Get Code — Step 1: FSub check ─────────────────
     elif data == "getcode":
@@ -204,11 +262,14 @@ async def cb_handler(client: Bot, query: CallbackQuery):
             buttons = await _fsub_buttons(client, user_id)
             buttons.append([
                 InlineKeyboardButton("♻️ Tʀʏ Aɢᴀɪɴ", callback_data="getcode"),
-                InlineKeyboardButton("🏠 Hᴏᴍᴇ",        callback_data="start"),
+                InlineKeyboardButton(" Hᴏᴍᴇ",        callback_data="start"),
             ])
             pic = get_pic("FORCE_PIC", FORCE_PIC)
             await loading.delete()
-            await query.message.delete()
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
             await client.send_photo(
                 chat_id=user_id, photo=pic,
                 caption=FORCE_MSG.format(
@@ -228,22 +289,32 @@ async def cb_handler(client: Bot, query: CallbackQuery):
             buttons  = []
             if mand_btn:
                 buttons.append([mand_btn])
-            buttons.append([InlineKeyboardButton("✅ Jᴏɪɴᴇᴅ — Gᴇɴᴇʀᴀᴛᴇ ᴍʏ ᴄᴏᴅᴇ", callback_data="generate")])
             buttons.append([
-                InlineKeyboardButton("🏠 Hᴏᴍᴇ", callback_data="start"),
+                InlineKeyboardButton("✅ Jᴏɪɴᴇᴅ — Gᴇɴᴇʀᴀᴛᴇ ᴍʏ ᴄᴏᴅᴇ", callback_data="generate")
+            ])
+            buttons.append([
+                InlineKeyboardButton(" Hᴏᴍᴇ", callback_data="start"),
                 InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close"),
             ])
             await loading.delete()
-            await query.message.edit_text(
-                "<b>🔐 Oɴᴇ Mᴏʀᴇ Sᴛᴇᴘ!\n\n"
-                "➪ Jᴏɪɴ ᴛʜᴇ Vᴇʀɪғɪᴄᴀᴛɪᴏɴ Cʜᴀɴɴᴇʟ ʙᴇʟᴏᴡ,\n"
-                "   ᴛʜᴇɴ ᴄʟɪᴄᴋ ✅ Jᴏɪɴᴇᴅ ʙᴜᴛᴛᴏɴ.</b>",
+            # ⚠️ Send new message instead of edit — avoids photo→text edit error
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            await client.send_message(
+                chat_id=user_id,
+                text=(
+                    "<b>🔐 Oɴᴇ Mᴏʀᴇ Sᴛᴇᴘ!\n\n"
+                    "➪ Jᴏɪɴ ᴛʜᴇ Vᴇʀɪғɪᴄᴀᴛɪᴏɴ Cʜᴀɴɴᴇʟ ʙᴇʟᴏᴡ,\n"
+                    "   ᴛʜᴇɴ ᴄʟɪᴄᴋ ✅ Jᴏɪɴᴇᴅ ʙᴜᴛᴛᴏɴ.</b>"
+                ),
                 reply_markup=InlineKeyboardMarkup(buttons),
                 parse_mode=ParseMode.HTML,
             )
             return
 
-        # All good
+        # All good → show/generate code
         await loading.delete()
         await _show_or_generate(client, query, user_id)
 
@@ -254,29 +325,61 @@ async def cb_handler(client: Bot, query: CallbackQuery):
             await query.answer("❌ Yᴏᴜ ʟᴇғᴛ ᴀ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟ!", show_alert=True)
             return
         if not await is_in_mandatory(client, user_id):
-            await query.answer("❌ Yᴏᴜ ʜᴀᴠᴇɴ'ᴛ ᴊᴏɪɴᴇᴅ ᴛʜᴇ ᴠᴇʀɪғɪᴄᴀᴛɪᴏɴ ᴄʜᴀɴɴᴇʟ ʏᴇᴛ!", show_alert=True)
+            await query.answer(
+                "❌ Yᴏᴜ ʜᴀᴠᴇɴ'ᴛ ᴊᴏɪɴᴇᴅ ᴛʜᴇ ᴠᴇʀɪғɪᴄᴀᴛɪᴏɴ ᴄʜᴀɴɴᴇʟ ʏᴇᴛ!\n"
+                "Jᴏɪɴ ɪᴛ ᴀɴᴅ ᴄᴏᴍᴇ ʙᴀᴄᴋ.",
+                show_alert=True,
+            )
             return
-        await _show_or_generate(client, query, user_id)
+        # Delete the "One More Step" message and show code
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await _send_code(client, user_id)
 
     # ── Revoke Confirm ────────────────────────────────
     elif data == "revoke_confirm":
         await query.answer()
         await revoke_code(user_id)
-        await query.message.edit_text(
-            "<b>♻️ Cᴏᴅᴇ Rᴇᴠᴏᴋᴇᴅ!\n\n"
-            "➪ Cʟɪᴄᴋ ʙᴇʟᴏᴡ ᴛᴏ ɢᴇɴᴇʀᴀᴛᴇ ᴀ ɴᴇᴡ ᴄᴏᴅᴇ.</b>",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔑 Gᴇᴛ Nᴇᴡ Cᴏᴅᴇ", callback_data="getcode")],
-                [InlineKeyboardButton("🏠 Hᴏᴍᴇ", callback_data="start"),
-                 InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close")],
-            ]),
-            parse_mode=ParseMode.HTML,
-        )
+        try:
+            await query.message.edit_text(
+                "<b>♻️ Cᴏᴅᴇ Rᴇᴠᴏᴋᴇᴅ!\n"
+                "➪ Cʟɪᴄᴋ ʙᴇʟᴏᴡ ᴛᴏ ɢᴇɴᴇʀᴀᴛᴇ ᴀ ɴᴇᴡ ᴄᴏᴅᴇ.</b>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔑 Gᴇᴛ Nᴇᴡ Cᴏᴅᴇ", callback_data="getcode")],
+                    [InlineKeyboardButton(" Hᴏᴍᴇ", callback_data="start"),
+                     InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close")],
+                ]),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            await query.message.delete()
+            await client.send_message(
+                chat_id=user_id,
+                text="<b>♻️ Cᴏᴅᴇ Rᴇᴠᴏᴋᴇᴅ! Cʟɪᴄᴋ ʙᴇʟᴏᴡ ᴛᴏ ɢᴇᴛ ᴀ ɴᴇᴡ ᴄᴏᴅᴇ.</b>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔑 Gᴇᴛ Nᴇᴡ Cᴏᴅᴇ", callback_data="getcode")],
+                    [InlineKeyboardButton(" Hᴏᴍᴇ", callback_data="start"),
+                     InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close")],
+                ]),
+                parse_mode=ParseMode.HTML,
+            )
 
 
-# ── Show existing or generate new code ───────────────
+# ── Show or generate code (helper) ───────────────────
 
 async def _show_or_generate(client, query: CallbackQuery, user_id: int):
+    """Called from getcode when all checks pass — deletes current msg and sends code."""
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await _send_code(client, user_id)
+
+
+async def _send_code(client, user_id: int):
+    """Generates or fetches code and sends it as a new message."""
     existing = await get_active_code(user_id)
 
     if existing:
@@ -308,13 +411,12 @@ async def _show_or_generate(client, query: CallbackQuery, user_id: int):
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("♻️ Rᴇᴠᴏᴋᴇ & Rᴇɢᴇɴ", callback_data="revoke_confirm")],
-        [InlineKeyboardButton("🏠 Hᴏᴍᴇ", callback_data="start"),
+        [InlineKeyboardButton(" Hᴏᴍᴇ", callback_data="start"),
          InlineKeyboardButton("✖️ Cʟᴏsᴇ", callback_data="close")],
     ])
 
     pic = get_pic("VERIFY_PIC", VERIFY_PIC)
     try:
-        await query.message.delete()
         await client.send_photo(
             chat_id=user_id, photo=pic, caption=txt,
             reply_markup=keyboard, parse_mode=ParseMode.HTML,
