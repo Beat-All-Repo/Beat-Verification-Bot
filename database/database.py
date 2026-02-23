@@ -223,7 +223,7 @@ def sync_global_stats() -> dict:
     }
 
 
-def sync_verify_code(code: str, device_id: str) -> dict:
+def sync_verify_code(code: str, device_id: str, ip: str = "unknown") -> dict:
     doc = s_codes_col.find_one({"code": code, "is_active": True})
     if not doc:
         return {"valid": False, "reason": "Code not found or no longer active"}
