@@ -22,8 +22,9 @@ _async_db      = _async_client[DB_NAME]
 a_users_col    = _async_db["users"]
 a_codes_col    = _async_db["codes"]
 a_devices_col  = _async_db["devices"]
-a_channels_col = _async_db["channels"]   # fsub channels
-a_settings_col = _async_db["settings"]   # mandatory channel + other settings
+a_channels_col = _async_db["channels"]       # fsub channels
+a_settings_col = _async_db["settings"]       # mandatory channel + other settings
+a_req_col      = _async_db["req_users"]      # join-request users per fsub channel
 
 # ── Sync client (Flask API) ───────────────────────────
 _sync_client  = MongoClient(MONGO_URI)
@@ -71,12 +72,60 @@ async def add_fsub_channel(channel_id: int):
 
 async def del_fsub_channel(channel_id: int):
     await a_channels_col.delete_one({"_id": channel_id, "type": "fsub"})
+    # Also clean up all req_users for this channel
+    await a_req_col.delete_one({"_id": channel_id})
 
 async def get_fsub_channels() -> list:
     return [doc["_id"] async for doc in a_channels_col.find({"type": "fsub"})]
 
 async def fsub_channel_exists(channel_id: int) -> bool:
     return bool(await a_channels_col.find_one({"_id": channel_id, "type": "fsub"}))
+
+
+# ═══════════════════════════════════════════════════════
+#  JOIN REQUEST USERS  (async)
+#
+#  Schema: { _id: channel_id, user_ids: [user_id, ...] }
+#
+#  Used for FSub channels with join-request mode.
+#  When a user sends a join request → store here.
+#  When user leaves → remove from here.
+#  is_subscribed checks MEMBER status OR this DB.
+# ═══════════════════════════════════════════════════════
+
+async def reqChannel_exist(channel_id: int) -> bool:
+    """Returns True if this channel is a fsub channel (all fsub channels use req mode)."""
+    return await fsub_channel_exists(channel_id)
+
+
+async def req_user_exist(channel_id: int, user_id: int) -> bool:
+    """Check if user is in the join-request list for this channel."""
+    doc = await a_req_col.find_one({"_id": channel_id})
+    if not doc:
+        return False
+    return user_id in doc.get("user_ids", [])
+
+
+async def req_user(channel_id: int, user_id: int):
+    """Add user to join-request list for this channel."""
+    await a_req_col.update_one(
+        {"_id": channel_id},
+        {"$addToSet": {"user_ids": user_id}},
+        upsert=True,
+    )
+
+
+async def del_req_user(channel_id: int, user_id: int):
+    """Remove user from join-request list for this channel."""
+    await a_req_col.update_one(
+        {"_id": channel_id},
+        {"$pull": {"user_ids": user_id}},
+    )
+
+
+async def del_all_req_users(channel_id: int):
+    """Remove all request users for a channel."""
+    await a_req_col.delete_one({"_id": channel_id})
 
 
 # ═══════════════════════════════════════════════════════
@@ -129,7 +178,7 @@ async def create_code(telegram_id: int) -> str:
 
 
 async def revoke_code(telegram_id: int):
-    """User-triggered revoke - deletes code from DB."""
+    """User-triggered revoke."""
     doc = await a_codes_col.find_one({"telegram_id": telegram_id, "is_active": True})
     if doc:
         await a_devices_col.delete_many({"code": doc["code"]})
@@ -137,7 +186,7 @@ async def revoke_code(telegram_id: int):
 
 
 async def invalidate_all_codes(telegram_id: int):
-    """Auto-revoke when user leaves a channel - deletes codes from DB."""
+    """Auto-revoke when user leaves a channel."""
     async for doc in a_codes_col.find({"telegram_id": telegram_id, "is_active": True}):
         await a_devices_col.delete_many({"code": doc["code"]})
         await a_codes_col.delete_one({"_id": doc["_id"]})
@@ -152,14 +201,6 @@ async def get_device_count(code: str) -> int:
 # ═══════════════════════════════════════════════════════
 
 def sync_global_stats() -> dict:
-    """
-    Returns exactly what your site expects from ?action=status:
-      active_codes    — currently active codes
-      max_concurrent  — device limit (2)
-      can_generate    — global flag (True)
-      total_used      — total codes ever claimed
-      active_users    — list of telegram IDs with active codes
-    """
     active_codes = s_codes_col.count_documents({"is_active": True})
     agg          = list(s_codes_col.aggregate([
         {"$group": {"_id": None, "total": {"$sum": "$total_claims"}}}
@@ -179,61 +220,39 @@ def sync_global_stats() -> dict:
 
 
 def sync_verify_code(code: str, device_id: str) -> dict:
-    """Full verify — registers device slot. Netflix-style: evicts oldest if full."""
     doc = s_codes_col.find_one({"code": code, "is_active": True})
     if not doc:
         return {"valid": False, "reason": "Code not found or no longer active"}
 
-    # Already registered on this device — allow in
-    existing = s_devices_col.find_one({"code": code, "device_id": device_id})
-    if existing:
+    if s_devices_col.find_one({"code": code, "device_id": device_id}):
         dev_count = s_devices_col.count_documents({"code": code})
-        return {
-            "valid": True, "telegram_id": doc["telegram_id"],
-            "devices_used": dev_count, "devices_max": MAX_DEVICES,
-            "device_slot": "existing",
-        }
+        return {"valid": True, "telegram_id": doc["telegram_id"],
+                "devices_used": dev_count, "devices_max": MAX_DEVICES, "device_slot": "existing"}
 
     dev_count = s_devices_col.count_documents({"code": code})
 
-    # Netflix style: if at limit, evict the oldest device to make room
     if dev_count >= MAX_DEVICES:
-        oldest = s_devices_col.find_one(
-            {"code": code},
-            sort=[("claimed_at", 1)]  # oldest first
-        )
+        oldest = s_devices_col.find_one({"code": code}, sort=[("claimed_at", 1)])
         if oldest:
             s_devices_col.delete_one({"_id": oldest["_id"]})
             dev_count -= 1
 
-    s_devices_col.insert_one({
-        "code":       code,
-        "device_id":  device_id,
-        "claimed_at": _now(),
-    })
+    s_devices_col.insert_one({"code": code, "device_id": device_id, "claimed_at": _now()})
     s_codes_col.update_one({"code": code}, {"$inc": {"total_claims": 1}})
-
-    return {
-        "valid": True, "telegram_id": doc["telegram_id"],
-        "devices_used": dev_count + 1, "devices_max": MAX_DEVICES,
-        "device_slot": "new",
-    }
+    return {"valid": True, "telegram_id": doc["telegram_id"],
+            "devices_used": dev_count + 1, "devices_max": MAX_DEVICES, "device_slot": "new"}
 
 
 def sync_check_code(code: str) -> dict:
-    """Lightweight check — does NOT register device."""
     doc = s_codes_col.find_one({"code": code, "is_active": True})
     if not doc:
         return {"valid": False, "reason": "Code not found or inactive"}
     dev_count = s_devices_col.count_documents({"code": code})
-    return {
-        "valid": True, "telegram_id": doc["telegram_id"],
-        "devices_used": dev_count, "devices_remaining": max(0, MAX_DEVICES - dev_count),
-    }
+    return {"valid": True, "telegram_id": doc["telegram_id"],
+            "devices_used": dev_count, "devices_remaining": max(0, MAX_DEVICES - dev_count)}
 
 
 def sync_revoke_code(code: str = None, telegram_id: int = None):
-    """Admin API revoke - deletes code from DB to save space."""
     if code:
         s_devices_col.delete_many({"code": code})
         s_codes_col.delete_one({"code": code})
