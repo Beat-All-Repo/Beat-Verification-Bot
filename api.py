@@ -37,6 +37,16 @@ def _body() -> dict:
     return request.get_json(silent=True) or {}
 
 
+def _get_ip() -> str:
+    """Get real client IP, accounting for proxies (Render, Cloudflare, etc.)"""
+    return (
+        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.headers.get("X-Real-IP", "")
+        or request.remote_addr
+        or "unknown"
+    )
+
+
 @app.route("/")
 def index():
     return jsonify({
@@ -80,13 +90,14 @@ def telegram_verify():
         body      = _body()
         code      = (request.args.get("code")      or body.get("code",      "")).strip()
         device_id = (request.args.get("device_id") or body.get("device_id", "")).strip()
+        ip        = _get_ip()
 
         if not code:
             return _err("Missing required field: 'code'")
         if not device_id:
             return _err("Missing required field: 'device_id'")
 
-        result = sync_verify_code(code, device_id)
+        result = sync_verify_code(code, device_id, ip=ip)
         return jsonify({"ok": result["valid"], **result})
         # Success:  { "ok": true,  "valid": true,  "telegram_id": 123, "devices_used": 1, "devices_max": 2 }
         # Invalid:  { "ok": false, "valid": false, "reason": "Code not found or no longer active" }
