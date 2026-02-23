@@ -2,7 +2,7 @@
 #  VERIFICATION BOT — HELPERS
 #
 #  FSub check: MEMBER status OR in req_users DB
-#  Mandatory check: MEMBER status only (direct join)
+#  Mandatory check: MEMBER status OR in req_users DB (handles both direct & request-mode channels)
 # ═══════════════════════════════════════════════════════
 
 import os
@@ -58,12 +58,19 @@ async def is_subscribed(client, user_id: int) -> bool:
 async def is_in_mandatory(client, user_id: int) -> bool:
     """
     Check mandatory verification channel.
-    Uses direct membership check only (mandatory channel uses direct join).
+    Accepts BOTH direct members AND join-request users —
+    this handles channels with 'Approve new members' enabled.
     """
     ch_id = await get_mandatory_channel()
     if not ch_id:
         return True  # No mandatory channel set → skip check
-    return await is_sub(client, user_id, ch_id)
+
+    # Check real membership first (direct join channels)
+    if await is_sub(client, user_id, ch_id):
+        return True
+
+    # Fall back to join-request DB (request-mode channels)
+    return await req_user_exist(ch_id, user_id)
 
 
 def get_pic(env_key: str, fallback: str) -> str:
